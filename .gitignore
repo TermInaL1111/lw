@@ -1,0 +1,8 @@
+# Ignore everything
+*
+/*
+
+# Except the event3d folder
+!/event3d/
+!/event3d/**
+!.gitignore
