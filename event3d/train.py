@@ -70,7 +70,7 @@ def build_model(config, device):
 def build_loss(config):
     """Build loss function from config."""
     loss_cfg = config['training']
-    loss_name = loss_cfg.get('loss', 'focal')
+    loss_name = loss_cfg.get('loss', 'bce')
 
     if loss_name == 'focal':
         return FocalLoss(
@@ -143,8 +143,11 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device,
         # Forward pass
         pred = model(event_volume)
 
-        # Loss
-        loss = criterion(torch.sigmoid(pred), voxel_target)
+        # Loss (BCEWithLogitsLoss takes raw logits; others take sigmoid)
+        if isinstance(criterion, nn.BCEWithLogitsLoss):
+            loss = criterion(pred, voxel_target)
+        else:
+            loss = criterion(torch.sigmoid(pred), voxel_target)
 
         # Backward
         optimizer.zero_grad()
@@ -188,7 +191,10 @@ def validate(model, dataloader, criterion, device, config):
         voxel_target = batch['voxel'].to(device)
 
         pred = model(event_volume)
-        loss = criterion(torch.sigmoid(pred), voxel_target)
+        if isinstance(criterion, nn.BCEWithLogitsLoss):
+            loss = criterion(pred, voxel_target)
+        else:
+            loss = criterion(torch.sigmoid(pred), voxel_target)
 
         total_loss += loss.item()
         iou = compute_iou(torch.sigmoid(pred), voxel_target, threshold=0.2)

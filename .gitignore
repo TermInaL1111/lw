@@ -2,7 +2,13 @@
 *
 /*
 
-# Except the event3d folder
+# Except event3d and .gitignore
 !/event3d/
 !/event3d/**
 !.gitignore
+
+# Within event3d, ignore pycache and image files
+__pycache__/
+*.pyc
+*.jpg
+*.png

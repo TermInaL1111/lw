@@ -30,12 +30,7 @@ class E2VModel(nn.Module):
     def __init__(self, in_channels=1, use_eca=False, voxel_size=32):
         super().__init__()
         self.encoder = ResNet152_3D_Encoder(in_channels=in_channels, use_eca=use_eca)
-        self.decoder = Decoder3D_UNet(
-            enc_channels=(256, 512, 1024, 2048),
-            mid_channels=(64, 128, 256, 512),
-            decoder_channels=(256, 128, 64, 32),
-            out_channels=1,
-        )
+        self.decoder = Decoder3D_UNet(out_channels=1, final_size=(32, 32, 32))
         self.voxel_size = voxel_size
         self.in_channels = in_channels
 

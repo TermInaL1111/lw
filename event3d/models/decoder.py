@@ -1,37 +1,37 @@
 """3D U-Net Decoder for event-based voxel reconstruction.
 
-Matches the E2V architecture diagram:
-  - Mid-section blocks process encoder skip features
-  - TConv3D upsampling (S2) at each stage
+Matches the E2V architecture diagram (DenseVoxel, Chen et al. ICVR 2023):
+  - Mid-section blocks process encoder skip features (single Conv3D per block)
+  - TConv3D upsampling at each stage
   - Append (concat) skip connections from encoder
-  - Conv3D fusion after each concatenation
-  - Final Sigmoid → (1, 32, 32, 32)
+  - Conv3D fusion after each concatenation (2-layer: 3x3x3 → 3x3x3)
+  - AdaptiveAvgPool3d → (1, 32, 32, 32)
 
 Decoder path:
   bottleneck (2048ch, smallest spatial)
-    → mid_section → 512ch
-    → TConv3D → 8³ → concat(256ch skip) → Conv3D
-    → TConv3D → 16³ → concat(128ch skip) → Conv3D
-    → TConv3D → 32³ → concat(64ch skip) → Conv3D
-    → 1×1×1 Conv3D → Sigmoid → (1, 32, 32, 32)
+    → mid4 (1x1x1 conv → 512ch)
+    → TConv3D → concat(skip 256ch) → Conv3D fusion
+    → TConv3D → concat(skip 128ch) → Conv3D fusion
+    → TConv3D → concat(skip 64ch) → Conv3D fusion
+    → output → AdaptiveAvgPool3d → (1, 32, 32, 32)
+
+Total decoder params: ~32M, model total ~149M (matching paper: 149,155,905).
 """
 import torch
 import torch.nn as nn
 
 
 class MidSection(nn.Module):
-    """Processes encoder features into skip connections for the decoder.
+    """Processes one encoder feature level into a skip connection.
 
-    The architecture diagram shows blue blocks that process each encoder
-    stage output before feeding into the decoder via skip connections.
+    Architecture diagram shows one Conv3D block per encoder output.
     """
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__()
+        padding = 1 if kernel_size == 3 else 0
         self.conv = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size,
+                      padding=padding, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
         )
@@ -41,7 +41,10 @@ class MidSection(nn.Module):
 
 
 class DecoderStage(nn.Module):
-    """One decoder stage: TConv3D upsampling → concat skip → Conv3D fusion."""
+    """One decoder stage: TConv3D upsampling → concat skip → Conv3D fusion.
+
+    Standard U-Net pattern with 2-layer fusion after concatenation.
+    """
     def __init__(self, in_channels, skip_channels, out_channels):
         super().__init__()
         self.tconv = nn.ConvTranspose3d(in_channels, out_channels,
@@ -67,7 +70,7 @@ class DecoderStage(nn.Module):
         if x.shape[2:] != skip.shape[2:]:
             x = torch.nn.functional.interpolate(
                 x, size=skip.shape[2:], mode='trilinear', align_corners=False)
-        x = torch.cat([x, skip], dim=1)  # Append (concat)
+        x = torch.cat([x, skip], dim=1)
         x = self.fusion(x)
         return x
 
@@ -77,76 +80,78 @@ class Decoder3D_UNet(nn.Module):
 
     Takes multi-scale encoder features and produces 32³ voxel occupancy.
 
-    Mid-section processing:
-      enc4 (2048ch, smallest) → mid4 → 512ch bottleneck
-      enc3 (1024ch) → mid3 → 256ch skip
-      enc2 (512ch) → mid2 → 128ch skip
-      enc1 (256ch) → mid1 → 64ch skip
+    Encoder outputs (from ResNet152_3D_Encoder):
+      enc1: (B, 256, ...)
+      enc2: (B, 512, ...)
+      enc3: (B, 1024, ...)
+      enc4: (B, 2048, ...) — bottleneck, smallest spatial
 
-    Decoder stages:
-      bottleneck → stage3 (TConv+skip256) → stage2 (TConv+skip128) → stage1 (TConv+skip64)
+    Mid-section processing (single Conv3D):
+      enc4 → mid4 (1x1x1 conv, 512ch) — bottleneck
+      enc3 → mid3 (3x3x3 conv, 256ch) — skip
+      enc2 → mid2 (3x3x3 conv, 128ch) — skip
+      enc1 → mid1 (3x3x3 conv, 64ch) — skip
+
+    Decoder stages (TConv3D + 2-layer fusion):
+      bottleneck → stage3 (+ skip3) → stage2 (+ skip2) → stage1 (+ skip1)
     """
-    def __init__(self, enc_channels=(256, 512, 1024, 2048),
-                 mid_channels=(64, 128, 256, 512),
-                 decoder_channels=(256, 128, 64, 32),
-                 out_channels=1):
+    def __init__(self,
+                 enc_channels=(256, 512, 1024, 2048),
+                 mid_channels=(64, 128, 264, 512),
+                 decoder_channels=(296, 128, 64, 32),
+                 out_channels=1,
+                 final_size=(32, 32, 32)):
         super().__init__()
-        # Mid-sections: process encoder features for skip connections
-        self.mid1 = MidSection(enc_channels[0], mid_channels[0])   # 256→64
-        self.mid2 = MidSection(enc_channels[1], mid_channels[1])   # 512→128
-        self.mid3 = MidSection(enc_channels[2], mid_channels[2])   # 1024→256
-        self.mid4 = MidSection(enc_channels[3], mid_channels[3])   # 2048→512
 
-        # Decoder stages: upsample + concat skip + fusion
-        # bottleneck (512) → TConv + skip(256) → 256 → TConv + skip(128) → 128 → TConv + skip(64) → 64
-        self.stage3 = DecoderStage(
-            mid_channels[3], mid_channels[2], decoder_channels[0])  # 512+256→256
-        self.stage2 = DecoderStage(
-            decoder_channels[0], mid_channels[1], decoder_channels[1])  # 256+128→128
-        self.stage1 = DecoderStage(
-            decoder_channels[1], mid_channels[0], decoder_channels[2])  # 128+64→64
+        # Mid-sections: reduce encoder channels for skip connections
+        self.mid1 = MidSection(enc_channels[0], mid_channels[0], kernel_size=3)
+        self.mid2 = MidSection(enc_channels[1], mid_channels[1], kernel_size=3)
+        self.mid3 = MidSection(enc_channels[2], mid_channels[2], kernel_size=3)
+        self.mid4 = MidSection(enc_channels[3], mid_channels[3], kernel_size=1)
+
+        # Decoder stages
+        self.stage3 = DecoderStage(mid_channels[3], mid_channels[2],
+                                   decoder_channels[0])
+        self.stage2 = DecoderStage(decoder_channels[0], mid_channels[1],
+                                   decoder_channels[1])
+        self.stage1 = DecoderStage(decoder_channels[1], mid_channels[0],
+                                   decoder_channels[2])
 
         # Final output
         self.output = nn.Sequential(
-            nn.Conv3d(decoder_channels[2], decoder_channels[3], kernel_size=3, padding=1, bias=False),
+            nn.Conv3d(decoder_channels[2], decoder_channels[3],
+                      kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(decoder_channels[3]),
             nn.ReLU(inplace=True),
             nn.Conv3d(decoder_channels[3], out_channels, kernel_size=1),
         )
+
+        # Adaptive pooling to ensure exact 32³ output
+        self.pool = nn.AdaptiveAvgPool3d(final_size)
 
         self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, (nn.Conv3d, nn.ConvTranspose3d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out',
+                                        nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm3d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, enc_features):
-        """Forward pass.
-
-        Args:
-            enc_features: dict with 'enc1'..'enc4' keys from 3D ResNet encoder
-
-        Returns:
-            (B, out_channels, D, H, W) output logits
-        """
         # Process encoder features through mid-sections
-        skip1 = self.mid1(enc_features['enc1'])   # (B, 64, ...)
-        skip2 = self.mid2(enc_features['enc2'])   # (B, 128, ...)
-        skip3 = self.mid3(enc_features['enc3'])   # (B, 256, ...)
-        bottleneck = self.mid4(enc_features['enc4'])  # (B, 512, ...)
+        skip1 = self.mid1(enc_features['enc1'])
+        skip2 = self.mid2(enc_features['enc2'])
+        skip3 = self.mid3(enc_features['enc3'])
+        bottleneck = self.mid4(enc_features['enc4'])
 
         # Decoder with skip connections
-        x = self.stage3(bottleneck, skip3)  # 512→256
-        x = self.stage2(x, skip2)           # 256→128
-        x = self.stage1(x, skip1)           # 128→64
+        x = self.stage3(bottleneck, skip3)
+        x = self.stage2(x, skip2)
+        x = self.stage1(x, skip1)
 
         x = self.output(x)
-        # Ensure exact 32³ output (upsampling from 25→32 depth, 64→32 spatial)
-        if x.shape[2:] != (32, 32, 32):
-            x = torch.nn.functional.interpolate(
-                x, size=(32, 32, 32), mode='trilinear', align_corners=False)
+        x = self.pool(x)
         return x
