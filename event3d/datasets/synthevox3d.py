@@ -147,5 +147,7 @@ def get_dataloader(root_dir, split_csv, split="train", batch_size=5,
     return torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle,
         num_workers=num_workers, pin_memory=True,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2,
         drop_last=(split == "train"),
     )

@@ -104,12 +104,9 @@ def event_frame_pos(events, num_frames=100, image_size=256):
     frame_idx = (t_norm * num_frames).long().clamp(0, num_frames - 1)
     pos_mask = p > 0
 
-    for f in range(num_frames):
-        mask = pos_mask & (frame_idx == f)
-        if mask.any():
-            xi = x[mask]
-            yi = y[mask]
-            frames[f, 0, yi, xi] = 1.0
+    if pos_mask.any():
+        flat_idx = frame_idx[pos_mask] * H * W + y[pos_mask] * W + x[pos_mask]
+        frames.view(-1).scatter_(0, flat_idx, 1.0)
 
     return frames
 
@@ -138,13 +135,8 @@ def event_frame(events, num_frames=100, image_size=256):
 
     frame_idx = (t_norm * num_frames).long().clamp(0, num_frames - 1)
 
-    for f in range(num_frames):
-        mask = frame_idx == f
-        if mask.any():
-            xi = x[mask]
-            yi = y[mask]
-            pi = p[mask]
-            frames[f, 0, yi, xi] += pi
+    flat_idx = frame_idx * H * W + y * W + x
+    frames.view(-1).scatter_add_(0, flat_idx, p)
 
     return frames
 
@@ -233,17 +225,10 @@ def build_sae(events, image_size=256, decay_tau=None, blur_sigma=None):
 
     # Build SAE: keep the most recent (largest t_norm) at each pixel
     sae = torch.zeros(H, W)
-    # Process events in order; later events naturally overwrite earlier ones
-    # but we need max pooling: use scatter with max reduction
-    # Since events may arrive in any order, use the normalized time directly
     flat_idx = y * W + x
-    sae_flat = sae.view(-1)
-    # Keep the maximum (most recent) timestamp
-    for i in range(len(events)):
-        idx = flat_idx[i]
-        if t_norm[i] > sae_flat[idx]:
-            sae_flat[idx] = t_norm[i]
-
+    # Sort by t_norm, then scatter — later (higher t_norm) overwrites earlier
+    sort_idx = t_norm.argsort()
+    sae.view(-1).scatter_(0, flat_idx[sort_idx], t_norm[sort_idx])
     sae = sae.view(1, H, W)
 
     # Optional: exponential decay
