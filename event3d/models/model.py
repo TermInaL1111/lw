@@ -27,10 +27,11 @@ class E2VModel(nn.Module):
         use_eca: add ECA modules to encoder (Xu2025)
         voxel_size: output resolution (32 for 32³)
     """
-    def __init__(self, in_channels=1, use_eca=False, voxel_size=32):
+    def __init__(self, in_channels=1, use_eca=False, voxel_size=32, dropout=0.0):
         super().__init__()
         self.encoder = ResNet152_3D_Encoder(in_channels=in_channels, use_eca=use_eca)
-        self.decoder = Decoder3D_UNet(out_channels=1, final_size=(32, 32, 32))
+        self.decoder = Decoder3D_UNet(out_channels=1, final_size=(32, 32, 32),
+                                      dropout=dropout)
         self.voxel_size = voxel_size
         self.in_channels = in_channels
 

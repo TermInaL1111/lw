@@ -26,15 +26,18 @@ class MidSection(nn.Module):
 
     Architecture diagram shows one Conv3D block per encoder output.
     """
-    def __init__(self, in_channels, out_channels, kernel_size=3):
+    def __init__(self, in_channels, out_channels, kernel_size=3, dropout=0.0):
         super().__init__()
         padding = 1 if kernel_size == 3 else 0
-        self.conv = nn.Sequential(
+        layers = [
             nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size,
                       padding=padding, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
-        )
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout3d(dropout))
+        self.conv = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.conv(x)
@@ -45,21 +48,28 @@ class DecoderStage(nn.Module):
 
     Standard U-Net pattern with 2-layer fusion after concatenation.
     """
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(self, in_channels, skip_channels, out_channels, dropout=0.0):
         super().__init__()
         self.tconv = nn.ConvTranspose3d(in_channels, out_channels,
                                          kernel_size=4, stride=2, padding=1, bias=False)
         self.bn_up = nn.BatchNorm3d(out_channels)
-        self.fusion = nn.Sequential(
+        fusion_layers = [
             nn.Conv3d(out_channels + skip_channels, out_channels,
                       kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
+        ]
+        if dropout > 0:
+            fusion_layers.append(nn.Dropout3d(dropout))
+        fusion_layers += [
             nn.Conv3d(out_channels, out_channels,
                       kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
-        )
+        ]
+        if dropout > 0:
+            fusion_layers.append(nn.Dropout3d(dropout))
+        self.fusion = nn.Sequential(*fusion_layers)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x, skip):
@@ -100,31 +110,41 @@ class Decoder3D_UNet(nn.Module):
                  mid_channels=(64, 128, 264, 512),
                  decoder_channels=(296, 128, 64, 32),
                  out_channels=1,
-                 final_size=(32, 32, 32)):
+                 final_size=(32, 32, 32),
+                 dropout=0.0):
         super().__init__()
 
         # Mid-sections: reduce encoder channels for skip connections
-        self.mid1 = MidSection(enc_channels[0], mid_channels[0], kernel_size=3)
-        self.mid2 = MidSection(enc_channels[1], mid_channels[1], kernel_size=3)
-        self.mid3 = MidSection(enc_channels[2], mid_channels[2], kernel_size=3)
-        self.mid4 = MidSection(enc_channels[3], mid_channels[3], kernel_size=1)
+        self.mid1 = MidSection(enc_channels[0], mid_channels[0], kernel_size=3,
+                               dropout=dropout)
+        self.mid2 = MidSection(enc_channels[1], mid_channels[1], kernel_size=3,
+                               dropout=dropout)
+        self.mid3 = MidSection(enc_channels[2], mid_channels[2], kernel_size=3,
+                               dropout=dropout)
+        self.mid4 = MidSection(enc_channels[3], mid_channels[3], kernel_size=1,
+                               dropout=dropout)
 
         # Decoder stages
         self.stage3 = DecoderStage(mid_channels[3], mid_channels[2],
-                                   decoder_channels[0])
+                                   decoder_channels[0], dropout=dropout)
         self.stage2 = DecoderStage(decoder_channels[0], mid_channels[1],
-                                   decoder_channels[1])
+                                   decoder_channels[1], dropout=dropout)
         self.stage1 = DecoderStage(decoder_channels[1], mid_channels[0],
-                                   decoder_channels[2])
+                                   decoder_channels[2], dropout=dropout)
 
         # Final output
-        self.output = nn.Sequential(
+        output_layers = [
             nn.Conv3d(decoder_channels[2], decoder_channels[3],
                       kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(decoder_channels[3]),
             nn.ReLU(inplace=True),
+        ]
+        if dropout > 0:
+            output_layers.append(nn.Dropout3d(dropout))
+        output_layers.append(
             nn.Conv3d(decoder_channels[3], out_channels, kernel_size=1),
         )
+        self.output = nn.Sequential(*output_layers)
 
         # Adaptive pooling to ensure exact 32³ output
         self.pool = nn.AdaptiveAvgPool3d(final_size)

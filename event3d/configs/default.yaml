@@ -13,12 +13,14 @@ data:
   val_split: 0.1
 
 model:
-  # Event representation: "event_frame_pos" | "sobel_event_frame_pos"
+  # Event representation: "event_frame_pos" | "sobel_event_frame_pos" | "event_frame_sae"
   event_representation: "event_frame_pos"
   # Use ECA (Efficient Channel Attention) — Xu2025 improvement
   use_eca: false
-  # Input channels to encoder (1 for Event Frame, 3 for MCEF)
+  # Input channels to encoder (1 for Event Frame, 3 for MCEF, 2 for SAE)
   encoder_in_channels: 1
+  # Dropout rate in decoder (0.0 = no dropout)
+  dropout: 0.0
   # Output voxel resolution
   voxel_size: 32
 

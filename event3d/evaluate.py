@@ -93,6 +93,7 @@ def main():
         in_channels=model_cfg.get('encoder_in_channels', 1),
         use_eca=model_cfg.get('use_eca', False),
         voxel_size=model_cfg.get('voxel_size', 32),
+        dropout=model_cfg.get('dropout', 0.0),
     )
     model = model.to(device)
 
