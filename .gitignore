@@ -13,5 +13,4 @@ __pycache__/
 *.jpg
 *.png
 event3d/checkpoints/
-event3d/logs/
 *.pth
